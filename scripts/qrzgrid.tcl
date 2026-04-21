@@ -2223,6 +2223,7 @@ proc fest_msg { nick uhand handle input } {
 }
 
 proc potaleague_pub { nick host hand chan text } {
+	if ![string equal "#redditnet" $chan] then { return }
 	global potaleaguebin
 	set params [sanitize_string [string trim "${text}"]]
 	putlog "potaleague pub: $nick $host $hand $chan $params"
@@ -2246,6 +2247,7 @@ proc potaleague_msg {nick uhand handle input} {
 }
 
 proc potaleagueadd_pub { nick host hand chan text } {
+	if ![string equal "#redditnet" $chan] then { return }
 	global potaleaguebin
 	set call [sanitize_string [string trim "${text}"]]
 	putlog "potaleagueadd pub: $nick $host $hand $chan $call"
