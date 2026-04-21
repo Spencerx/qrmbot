@@ -82,17 +82,17 @@ unless (defined $abbrev) {
 my $useragent = "Mozilla/5.0 (compatible; qrmbot)";
 my $url = "https://api-web.nhle.com/v1/scoreboard/$abbrev/now";
 
-my $raw = '';
 open(my $fh, '-|', "curl --max-time 10 -s -k -L -A \"$useragent\" '$url'");
-while (<$fh>) { $raw .= $_; }
+local $/;
+my $raw = <$fh>;
 close($fh);
 
-my $data;
-eval { $data = decode_json($raw); };
-if ($@ || !defined($data)) {
+if (!defined($raw) || $raw !~ /^\s*\{/) {
   print "error: failed to fetch NHL data\n";
   exit 0;
 }
+
+my $data = decode_json($raw);
 
 my $gamesByDate = $data->{gamesByDate} // [];
 
