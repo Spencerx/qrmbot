@@ -68,6 +68,11 @@ if (!defined($input) || $input eq '') {
   exit 0;
 }
 
+if ($input eq 'birds') {
+  print "fuck the birds\n";
+  exit 0;
+}
+
 my $abbrev = $teammap{$input};
 unless (defined $abbrev) {
   (my $stripped = $input) =~ s/^the\s+//i;
