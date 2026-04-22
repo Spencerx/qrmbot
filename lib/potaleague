@@ -1,13 +1,14 @@
 #!/usr/bin/perl
 #
-# POTA yearly league -- !potaleague [year] and !potaleagueadd <callsign>
+# POTA yearly league -- !potaleague [year], !potaleagueadd, !potaleaguedel
 #
-# Registered callsigns persist in $HOME/.qrmbot/potaleague (one per line).
+# Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
+# (one entry per line: "<channel> <callsign>").
 # Activation and QSO counts are fetched live from the POTA API, so any
 # calendar year can be queried as long as POTA retains the history.
 #
 # 2-clause BSD license.
-# Copyright (c) 2026 molo1134@github. All rights reserved.
+# Copyright (c) 2026 nreed97@github. All rights reserved.
 
 # https://api.pota.app/activations/user/<callsign>  -- list of all activations
 # https://api.pota.app/profile/<callsign>            -- user profile / stats
@@ -34,16 +35,25 @@ $exitnonzeroonerror = 0 if $username eq getEggdropUID();
 @ARGV = map { decode "utf-8", $_ } @ARGV;
 @ARGV = split(' ', join(' ', @ARGV));
 
-my $leaguefile = $ENV{'HOME'} . "/.qrmbot/potaleague";
+my $leaguefile = $ENV{'HOME'} . "/.qrmbot/db/potaleague";
 
-my $year      = strftime("%Y", gmtime(time()));
+my $year        = strftime("%Y", gmtime(time()));
+my $channel     = undef;
 my $do_register = 0;
-my $callsign  = undef;
+my $do_remove   = 0;
+my $callsign    = undef;
 
 my $i = 0;
 while ($i <= $#ARGV) {
-  if ($ARGV[$i] =~ /^--(register|add)$/i) {
+  if ($ARGV[$i] =~ /^--channel$/i) {
+    $i++;
+    $channel = lc $ARGV[$i] if defined $ARGV[$i];
+  } elsif ($ARGV[$i] =~ /^--(register|add)$/i) {
     $do_register = 1;
+    $i++;
+    $callsign = uc $ARGV[$i] if defined $ARGV[$i];
+  } elsif ($ARGV[$i] =~ /^--(remove|del|delete)$/i) {
+    $do_remove = 1;
     $i++;
     $callsign = uc $ARGV[$i] if defined $ARGV[$i];
   } elsif ($ARGV[$i] =~ /^\d{4}$/) {
@@ -52,60 +62,110 @@ while ($i <= $#ARGV) {
   $i++;
 }
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+sub read_entries {
+  my @entries = ();
+  return @entries unless -f $leaguefile;
+  open(my $fh, '<', $leaguefile) or die "cannot open $leaguefile: $!";
+  while (<$fh>) { chomp; push @entries, $_ if length $_ > 0; }
+  close($fh);
+  return @entries;
+}
+
+sub write_entries {
+  open(my $fh, '>', $leaguefile) or die "cannot write $leaguefile: $!";
+  print $fh "$_\n" for @_;
+  close($fh);
+}
+
 # ── Registration ─────────────────────────────────────────────────────────────
 
 if ($do_register) {
+  if (!defined $channel) {
+    print "error: use !potaleagueadd in a channel\n";
+    exit $exitnonzeroonerror;
+  }
   if (!defined $callsign or $callsign eq "") {
     if ($username eq getEggdropUID()) {
       print "usage: !potaleagueadd <callsign>\n";
     } else {
-      print "usage: $0 --register <callsign>\n";
+      print "usage: $0 --channel <channel> --register <callsign>\n";
     }
     exit $exitnonzeroonerror;
   }
-
   if ($callsign !~ /^[A-Z0-9\/]+$/) {
     print "error: invalid callsign: $callsign\n";
     exit $exitnonzeroonerror;
   }
 
-  my @existing = ();
-  if (-f $leaguefile) {
-    open(my $fh, '<', $leaguefile) or die "cannot open $leaguefile: $!";
-    while (<$fh>) { chomp; push @existing, $_ if length $_ > 0; }
-    close($fh);
-  }
-
-  if (grep { uc $_ eq $callsign } @existing) {
-    print bold($callsign) . " is already in the POTA league\n";
+  my @existing = read_entries();
+  my $key = "$channel $callsign";
+  if (grep { lc $_ eq lc $key } @existing) {
+    print bold($callsign) . " is already in the POTA league for $channel\n";
     exit 0;
   }
 
-  push @existing, $callsign;
-  open(my $fh, '>', $leaguefile) or die "cannot write $leaguefile: $!";
-  print $fh "$_\n" for @existing;
-  close($fh);
+  push @existing, $key;
+  write_entries(@existing);
+  print "registered " . bold($callsign) . " for the POTA league in $channel\n";
+  exit 0;
+}
 
-  print "registered " . bold($callsign) . " for the POTA league\n";
+# ── Removal ───────────────────────────────────────────────────────────────────
+
+if ($do_remove) {
+  if (!defined $channel) {
+    print "error: use !potaleaguedel in a channel\n";
+    exit $exitnonzeroonerror;
+  }
+  if (!defined $callsign or $callsign eq "") {
+    if ($username eq getEggdropUID()) {
+      print "usage: !potaleaguedel <callsign>\n";
+    } else {
+      print "usage: $0 --channel <channel> --remove <callsign>\n";
+    }
+    exit $exitnonzeroonerror;
+  }
+  if ($callsign !~ /^[A-Z0-9\/]+$/) {
+    print "error: invalid callsign: $callsign\n";
+    exit $exitnonzeroonerror;
+  }
+
+  my @existing = read_entries();
+  my $key = "$channel $callsign";
+  my @updated = grep { lc $_ ne lc $key } @existing;
+
+  if (@updated == @existing) {
+    print bold($callsign) . " is not registered in the POTA league for $channel\n";
+    exit 0;
+  }
+
+  write_entries(@updated);
+  print "removed " . bold($callsign) . " from the POTA league in $channel\n";
   exit 0;
 }
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
-my @calls = ();
-if (-f $leaguefile) {
-  open(my $fh, '<', $leaguefile) or die "cannot open $leaguefile: $!";
-  while (<$fh>) { chomp; push @calls, $_ if length $_ > 0; }
-  close($fh);
+my @entries = read_entries();
+my @calls;
+if (defined $channel) {
+  @calls = map  { (split ' ', $_, 2)[1] }
+           grep { lc((split ' ', $_, 2)[0]) eq lc($channel) } @entries;
+} else {
+  my %seen;
+  @calls = grep { !$seen{$_}++ }
+           map  { (split ' ', $_, 2)[1] } @entries;
 }
 
 if (@calls == 0) {
-  print "no callsigns registered for POTA league -- use !potaleagueadd <callsign>\n";
+  my $where = defined $channel ? " in $channel" : "";
+  print "no callsigns registered for POTA league${where} -- use !potaleagueadd <callsign>\n";
   exit 0;
 }
 
 my %stats;
-
 for my $call (@calls) {
   my $url = "https://api.pota.app/activations/user/" . uri_escape($call);
 
@@ -123,13 +183,10 @@ for my $call (@calls) {
 
   my ($act_count, $qso_count) = (0, 0);
   for my $act (@{$acts}) {
-    # date field may be "YYYY-MM-DD" (profile style) or "YYYYMMDD" (park style)
     my $date = $act->{date} // $act->{qso_date} // "";
     my $act_year = ($date =~ /^(\d{4})/) ? $1 : "";
     next unless $act_year eq $year;
-
     $act_count++;
-    # QSO count field varies by endpoint
     $qso_count += $act->{total} // $act->{totalQSOs} // 0;
   }
 
@@ -138,7 +195,8 @@ for my $call (@calls) {
 }
 
 if (keys %stats == 0) {
-  print "no POTA activations found for $year among registered callsigns\n";
+  my $where = defined $channel ? " in $channel" : "";
+  print "no POTA activations found for $year${where}\n";
   exit 0;
 }
 

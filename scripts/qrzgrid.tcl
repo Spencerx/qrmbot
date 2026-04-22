@@ -184,6 +184,10 @@ bind msg - !potaleagueadd potaleagueadd_msg
 bind pub - !potaleagueadd potaleagueadd_pub
 bind msg - !potaleaguereg potaleagueadd_msg
 bind pub - !potaleaguereg potaleagueadd_pub
+bind msg - !potaleaguedel potaleaguedel_msg
+bind pub - !potaleaguedel potaleaguedel_pub
+bind msg - !potaleagueremove potaleaguedel_msg
+bind pub - !potaleagueremove potaleaguedel_pub
 
 bind msg - !potaspots potaspots_msg
 bind pub - !potaspots potaspots_pub
@@ -2223,11 +2227,10 @@ proc fest_msg { nick uhand handle input } {
 }
 
 proc potaleague_pub { nick host hand chan text } {
-	if ![string equal "#redditnet" $chan] then { return }
 	global potaleaguebin
 	set params [sanitize_string [string trim "${text}"]]
 	putlog "potaleague pub: $nick $host $hand $chan $params"
-	set fd [open "|${potaleaguebin} ${params}" r]
+	set fd [open "|${potaleaguebin} --channel ${chan} ${params}" r]
 	fconfigure $fd -encoding utf-8
 	while {[gets $fd line] >= 0} {
 		putchan $chan "$line"
@@ -2247,15 +2250,14 @@ proc potaleague_msg {nick uhand handle input} {
 }
 
 proc potaleagueadd_pub { nick host hand chan text } {
-	if ![string equal "#redditnet" $chan] then { return }
 	global potaleaguebin
 	set call [sanitize_string [string trim "${text}"]]
 	putlog "potaleagueadd pub: $nick $host $hand $chan $call"
-	if [string equal "" $call] then {
+	if {[string equal "" $call]} then {
 		putchan $chan "usage: !potaleagueadd <callsign>"
 		return
 	}
-	set fd [open "|${potaleaguebin} --register ${call}" r]
+	set fd [open "|${potaleaguebin} --channel ${chan} --register ${call}" r]
 	fconfigure $fd -encoding utf-8
 	while {[gets $fd line] >= 0} {
 		putchan $chan "$line"
@@ -2266,11 +2268,42 @@ proc potaleagueadd_msg {nick uhand handle input} {
 	global potaleaguebin
 	set call [sanitize_string [string trim "${input}"]]
 	putlog "potaleagueadd msg: $nick $uhand $handle $call"
-	if [string equal "" $call] then {
-		putmsg "$nick" "usage: !potaleagueadd <callsign>"
+	if {[string equal "" $call]} then {
+		putmsg "$nick" "usage: !potaleagueadd <callsign> (must be used in a channel)"
 		return
 	}
 	set fd [open "|${potaleaguebin} --register ${call}" r]
+	fconfigure $fd -encoding utf-8
+	while {[gets $fd line] >= 0} {
+		putmsg "$nick" "$line"
+	}
+	close $fd
+}
+
+proc potaleaguedel_pub { nick host hand chan text } {
+	global potaleaguebin
+	set call [sanitize_string [string trim "${text}"]]
+	putlog "potaleaguedel pub: $nick $host $hand $chan $call"
+	if {[string equal "" $call]} then {
+		putchan $chan "usage: !potaleaguedel <callsign>"
+		return
+	}
+	set fd [open "|${potaleaguebin} --channel ${chan} --remove ${call}" r]
+	fconfigure $fd -encoding utf-8
+	while {[gets $fd line] >= 0} {
+		putchan $chan "$line"
+	}
+	close $fd
+}
+proc potaleaguedel_msg {nick uhand handle input} {
+	global potaleaguebin
+	set call [sanitize_string [string trim "${input}"]]
+	putlog "potaleaguedel msg: $nick $uhand $handle $call"
+	if {[string equal "" $call]} then {
+		putmsg "$nick" "usage: !potaleaguedel <callsign> (must be used in a channel)"
+		return
+	}
+	set fd [open "|${potaleaguebin} --remove ${call}" r]
 	fconfigure $fd -encoding utf-8
 	while {[gets $fd line] >= 0} {
 		putmsg "$nick" "$line"
