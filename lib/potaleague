@@ -5,11 +5,13 @@
 # Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
 # (one entry per line: "<channel> <callsign>").
 #
-# Activation data is cached in the same file as ACT lines:
-#   ACT <callsign> <year> <date> <reference> <total>
-# Each !potaleague run merges the latest API results into the cache so
-# that activations are accumulated over time, working around the public
-# API's 25-record limit.
+# Activation data is cached in the same file:
+#   ACT   <call> <year> <date> <ref> <total>  -- current year, per-activation
+#   TOTAL <call> <year> <acts> <qsos>         -- past years, collapsed totals
+#
+# Each !potaleague run merges fresh API data into ACT lines.  On every
+# write, ACT lines from past years are collapsed into a single TOTAL line
+# per callsign per year, keeping the file small regardless of history.
 #
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
@@ -49,7 +51,8 @@ if (not -d $dbdir) {
   }
 }
 
-my $year        = strftime("%Y", gmtime(time()));
+my $cur_year    = strftime("%Y", gmtime(time()));
+my $year        = $cur_year;
 my $channel     = undef;
 my $do_register = 0;
 my $do_remove   = 0;
@@ -90,30 +93,47 @@ sub write_file {
   close($fh);
 }
 
+# Returns (\@regs, \%act_cache, \%totals)
+#   act_cache: lc("CALL YEAR DATE REF") => { call, year, date, ref, total }
+#   totals:    lc("CALL YEAR")          => { call, year, acts, qsos }
 sub parse_file {
-  my @regs;
-  my %cache;  # lc("CALL YEAR DATE REF") => { call, year, date, ref, total }
+  my (@regs, %act, %tot);
   for my $line (read_file()) {
     if ($line =~ /^ACT\s+(\S+)\s+(\d{4})\s+(\S+)\s+(\S+)\s+(\d+)$/) {
       my ($call, $yr, $date, $ref, $tot) = (uc $1, $2, $3, $4, $5+0);
-      $cache{lc "$call $yr $date $ref"} =
+      $act{lc "$call $yr $date $ref"} =
         { call => $call, year => $yr, date => $date, ref => $ref, total => $tot };
+    } elsif ($line =~ /^TOTAL\s+(\S+)\s+(\d{4})\s+(\d+)\s+(\d+)$/) {
+      my ($call, $yr, $acts, $qsos) = (uc $1, $2, $3+0, $4+0);
+      $tot{lc "$call $yr"} = { call => $call, year => $yr, acts => $acts, qsos => $qsos };
     } else {
       push @regs, $line;
     }
   }
-  return (\@regs, \%cache);
+  return (\@regs, \%act, \%tot);
 }
 
+# Collapse past-year ACT entries into TOTAL, then write everything out.
 sub flush_file {
-  my ($regs, $cache) = @_;
-  my $cur_year  = strftime("%Y", gmtime(time()));
-  my $keep_from = $cur_year - 1;
-  my @cache_lines = map {
-    my $e = $cache->{$_};
+  my ($regs, $act, $tot) = @_;
+  for my $key (keys %{$act}) {
+    my $e = $act->{$key};
+    next if $e->{year} eq $cur_year;
+    my $tk = lc "$e->{call} $e->{year}";
+    $tot->{$tk} //= { call => $e->{call}, year => $e->{year}, acts => 0, qsos => 0 };
+    $tot->{$tk}{acts}++;
+    $tot->{$tk}{qsos} += $e->{total};
+    delete $act->{$key};
+  }
+  my @tot_lines = map {
+    my $t = $tot->{$_};
+    "TOTAL $t->{call} $t->{year} $t->{acts} $t->{qsos}"
+  } sort keys %{$tot};
+  my @act_lines = map {
+    my $e = $act->{$_};
     "ACT $e->{call} $e->{year} $e->{date} $e->{ref} $e->{total}"
-  } grep { $cache->{$_}{year} >= $keep_from } sort keys %{$cache};
-  write_file(@{$regs}, @cache_lines);
+  } sort keys %{$act};
+  write_file(@{$regs}, @tot_lines, @act_lines);
 }
 
 # ── Registration ─────────────────────────────────────────────────────────────
@@ -136,7 +156,7 @@ if ($do_register) {
     exit $exitnonzeroonerror;
   }
 
-  my ($regs, $cache) = parse_file();
+  my ($regs, $act, $tot) = parse_file();
   my $key = "$channel $callsign";
   if (grep { lc $_ eq lc $key } @{$regs}) {
     print bold($callsign) . " is already in the POTA league for $channel\n";
@@ -144,7 +164,7 @@ if ($do_register) {
   }
 
   push @{$regs}, $key;
-  flush_file($regs, $cache);
+  flush_file($regs, $act, $tot);
   print "registered " . bold($callsign) . " for the POTA league in $channel\n";
   exit 0;
 }
@@ -169,7 +189,7 @@ if ($do_remove) {
     exit $exitnonzeroonerror;
   }
 
-  my ($regs, $cache) = parse_file();
+  my ($regs, $act, $tot) = parse_file();
   my $key = "$channel $callsign";
   my @updated = grep { lc $_ ne lc $key } @{$regs};
 
@@ -178,14 +198,14 @@ if ($do_remove) {
     exit 0;
   }
 
-  flush_file(\@updated, $cache);
+  flush_file(\@updated, $act, $tot);
   print "removed " . bold($callsign) . " from the POTA league in $channel\n";
   exit 0;
 }
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
-my ($regs, $cache) = parse_file();
+my ($regs, $act, $tot) = parse_file();
 
 my @calls;
 if (defined $channel) {
@@ -203,7 +223,7 @@ if (@calls == 0) {
   exit 0;
 }
 
-# Fetch latest activations and merge into cache
+# Fetch latest activations and merge into ACT cache
 my %callset = map { lc $_ => 1 } @calls;
 for my $call (@calls) {
   my $url = "https://api.pota.app/profile/" . uri_escape($call);
@@ -224,28 +244,38 @@ for my $call (@calls) {
   my $acts = $j->{recent_activity}{activations};
   next unless ref $acts eq 'ARRAY';
 
-  for my $act (@{$acts}) {
-    my $date = $act->{date} // "";
-    my $ref  = $act->{reference} // "noref";
-    my $tot  = $act->{total} // 0;
+  for my $a (@{$acts}) {
+    my $date = $a->{date} // "";
+    my $ref  = $a->{reference} // "noref";
+    my $tot  = $a->{total} // 0;
     my ($act_year) = $date =~ /^(\d{4})/;
     next unless $act_year;
+    # Skip past years that already have a collapsed TOTAL -- adding them
+    # again would double-count once flush merges ACT into the existing TOTAL.
+    next if $act_year ne $cur_year and exists $tot->{lc "$call $act_year"};
     my $cachekey = lc "$call $act_year $date $ref";
-    $cache->{$cachekey} //=
+    $act->{$cachekey} //=
       { call => uc $call, year => $act_year, date => $date, ref => $ref, total => $tot };
   }
 }
 
-# Persist updated cache
-flush_file($regs, $cache);
+# Persist: collapses past-year ACT → TOTAL, writes everything
+flush_file($regs, $act, $tot);
 
-# Compute leaderboard from full cache for the requested year
+# Compute leaderboard from ACT cache (current year) + TOTAL (historical)
 my %stats;
-for my $e (values %{$cache}) {
+for my $e (values %{$act}) {
   next unless $e->{year} eq $year;
   next unless $callset{lc $e->{call}};
   $stats{uc $e->{call}}{activations}++;
   $stats{uc $e->{call}}{qsos} += $e->{total};
+}
+for my $t (values %{$tot}) {
+  next unless $t->{year} eq $year;
+  next unless $callset{lc $t->{call}};
+  my $call = uc $t->{call};
+  $stats{$call}{activations} = ($stats{$call}{activations} // 0) + $t->{acts};
+  $stats{$call}{qsos}        = ($stats{$call}{qsos}        // 0) + $t->{qsos};
 }
 
 if (keys %stats == 0) {
