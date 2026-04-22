@@ -10,8 +10,7 @@
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
 
-# https://api.pota.app/activations/user/<callsign>  -- list of all activations
-# https://api.pota.app/profile/<callsign>            -- user profile / stats
+# https://api.pota.app/profile/<callsign>  -- user profile / recent_activity
 
 use URI::Escape;
 use JSON qw( decode_json );
@@ -176,7 +175,7 @@ if (@calls == 0) {
 
 my %stats;
 for my $call (@calls) {
-  my $url = "https://api.pota.app/activations/user/" . uri_escape($call);
+  my $url = "https://api.pota.app/profile/" . uri_escape($call);
 
   local $/;
   open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
@@ -184,19 +183,23 @@ for my $call (@calls) {
   close(JSON);
 
   next unless defined $json and $json ne "";
+  next if $json =~ /not found/i;
 
-  my $acts;
-  eval { $acts = decode_json($json); };
+  my $j;
+  eval { $j = decode_json($json); };
   next if $@;
+  next unless ref $j eq 'HASH';
+
+  my $acts = $j->{recent_activity}->{activations};
   next unless ref $acts eq 'ARRAY';
 
   my ($act_count, $qso_count) = (0, 0);
   for my $act (@{$acts}) {
-    my $date = $act->{date} // $act->{qso_date} // "";
+    my $date = $act->{date} // "";
     my $act_year = ($date =~ /^(\d{4})/) ? $1 : "";
     next unless $act_year eq $year;
     $act_count++;
-    $qso_count += $act->{total} // $act->{totalQSOs} // 0;
+    $qso_count += $act->{total} // 0;
   }
 
   $stats{$call} = { activations => $act_count, qsos => $qso_count }
