@@ -3,15 +3,23 @@
 # POTA yearly league -- !potaleague [year], !potaleagueadd, !potaleaguedel
 #
 # Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
-# (one entry per line: "<channel> <callsign>").
+# (one entry per line: "<channel> <callsign> [join-date]").
 #
-# Activation data is cached in the same file:
-#   ACT   <call> <year> <date> <ref> <total>  -- current year, per-activation
-#   TOTAL <call> <year> <acts> <qsos>         -- past years, collapsed totals
+# Activation data is cached in the same file (current year only):
+#   ACT <call> <year> <date> <ref> <total>
 #
-# Each !potaleague run merges fresh API data into ACT lines.  On every
-# write, ACT lines from past years are collapsed into a single TOTAL line
-# per callsign per year, keeping the file small regardless of history.
+# On every !potaleague run the latest API window (<=25 activations) is merged
+# into ACT lines for the current year.  Past-year data from the API is ignored:
+# the 25-record cap makes historical counts unreliable.
+#
+# For !potaleague <past-year> the live API is queried directly with no caching;
+# output is labelled "(approx)" to reflect the API limit.
+#
+# When a callsign is registered during the current year its join date is stored
+# so the leaderboard can flag entries whose data may be incomplete (i.e. the
+# member had >25 current-year activations before joining the league).
+# Existing registration lines without a join date are treated as legacy and
+# receive no asterisk.
 #
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
@@ -51,9 +59,10 @@ if (not -d $dbdir) {
   }
 }
 
-my $cur_year    = strftime("%Y", gmtime(time()));
-my $year        = $cur_year;
-my $channel     = undef;
+my $cur_year = strftime("%Y", gmtime(time()));
+my $cur_date = strftime("%Y-%m-%d", gmtime(time()));
+my $year     = $cur_year;
+my $channel  = undef;
 my $do_register = 0;
 my $do_remove   = 0;
 my $callsign    = undef;
@@ -93,47 +102,33 @@ sub write_file {
   close($fh);
 }
 
-# Returns (\@regs, \%act_cache, \%totals)
+# Returns (\@regs, \%act_cache)
+#   regs:      raw registration lines ("<channel> <call> [YYYY-MM-DD]")
 #   act_cache: lc("CALL YEAR DATE REF") => { call, year, date, ref, total }
-#   totals:    lc("CALL YEAR")          => { call, year, acts, qsos }
 sub parse_file {
-  my (@regs, %act, %tot);
+  my (@regs, %act);
   for my $line (read_file()) {
     if ($line =~ /^ACT\s+(\S+)\s+(\d{4})\s+(\S+)\s+(\S+)\s+(\d+)$/) {
       my ($call, $yr, $date, $ref, $tot) = (uc $1, $2, $3, $4, $5+0);
       $act{lc "$call $yr $date $ref"} =
         { call => $call, year => $yr, date => $date, ref => $ref, total => $tot };
-    } elsif ($line =~ /^TOTAL\s+(\S+)\s+(\d{4})\s+(\d+)\s+(\d+)$/) {
-      my ($call, $yr, $acts, $qsos) = (uc $1, $2, $3+0, $4+0);
-      $tot{lc "$call $yr"} = { call => $call, year => $yr, acts => $acts, qsos => $qsos };
+    } elsif ($line =~ /^TOTAL\s/) {
+      # legacy line from old caching scheme -- discard silently
     } else {
       push @regs, $line;
     }
   }
-  return (\@regs, \%act, \%tot);
+  return (\@regs, \%act);
 }
 
-# Collapse past-year ACT entries into TOTAL, then write everything out.
+# Write registrations + current-year ACT lines only.
 sub flush_file {
-  my ($regs, $act, $tot) = @_;
-  for my $key (keys %{$act}) {
-    my $e = $act->{$key};
-    next if $e->{year} eq $cur_year;
-    my $tk = lc "$e->{call} $e->{year}";
-    $tot->{$tk} //= { call => $e->{call}, year => $e->{year}, acts => 0, qsos => 0 };
-    $tot->{$tk}{acts}++;
-    $tot->{$tk}{qsos} += $e->{total};
-    delete $act->{$key};
-  }
-  my @tot_lines = map {
-    my $t = $tot->{$_};
-    "TOTAL $t->{call} $t->{year} $t->{acts} $t->{qsos}"
-  } sort keys %{$tot};
+  my ($regs, $act) = @_;
   my @act_lines = map {
     my $e = $act->{$_};
     "ACT $e->{call} $e->{year} $e->{date} $e->{ref} $e->{total}"
-  } sort keys %{$act};
-  write_file(@{$regs}, @tot_lines, @act_lines);
+  } grep { $act->{$_}{year} eq $cur_year } sort keys %{$act};
+  write_file(@{$regs}, @act_lines);
 }
 
 # ── Registration ─────────────────────────────────────────────────────────────
@@ -156,15 +151,14 @@ if ($do_register) {
     exit $exitnonzeroonerror;
   }
 
-  my ($regs, $act, $tot) = parse_file();
-  my $key = "$channel $callsign";
-  if (grep { lc $_ eq lc $key } @{$regs}) {
+  my ($regs, $act) = parse_file();
+  if (grep { my @f = split(' ', $_, 3); lc("$f[0] $f[1]") eq lc("$channel $callsign") } @{$regs}) {
     print bold($callsign) . " is already in the POTA league for $channel\n";
     exit 0;
   }
 
-  push @{$regs}, $key;
-  flush_file($regs, $act, $tot);
+  push @{$regs}, "$channel $callsign $cur_date";
+  flush_file($regs, $act);
   print "registered " . bold($callsign) . " for the POTA league in $channel\n";
   exit 0;
 }
@@ -189,32 +183,45 @@ if ($do_remove) {
     exit $exitnonzeroonerror;
   }
 
-  my ($regs, $act, $tot) = parse_file();
-  my $key = "$channel $callsign";
-  my @updated = grep { lc $_ ne lc $key } @{$regs};
+  my ($regs, $act) = parse_file();
+  my @updated = grep {
+    my @f = split(' ', $_, 3);
+    lc("$f[0] $f[1]") ne lc("$channel $callsign")
+  } @{$regs};
 
   if (@updated == @{$regs}) {
     print bold($callsign) . " is not registered in the POTA league for $channel\n";
     exit 0;
   }
 
-  flush_file(\@updated, $act, $tot);
+  flush_file(\@updated, $act);
   print "removed " . bold($callsign) . " from the POTA league in $channel\n";
   exit 0;
 }
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
-my ($regs, $act, $tot) = parse_file();
+my ($regs, $act) = parse_file();
 
+# Build call list and join-date map for this channel (or all channels).
 my @calls;
+my %reg_join;  # uc(call) => "YYYY-MM-DD" or undef for legacy entries
 if (defined $channel) {
-  @calls = map  { (split ' ', $_, 2)[1] }
-           grep { lc((split ' ', $_, 2)[0]) eq lc($channel) } @{$regs};
+  for my $line (grep { lc((split(' ', $_, 3))[0]) eq lc($channel) } @{$regs}) {
+    my @f = split(' ', $line, 3);
+    my $c = uc $f[1];
+    push @calls, $c;
+    $reg_join{$c} = $f[2];
+  }
 } else {
   my %seen;
-  @calls = grep { !$seen{$_}++ }
-           map  { (split ' ', $_, 2)[1] } @{$regs};
+  for my $line (@{$regs}) {
+    my @f = split(' ', $line, 3);
+    my $c = uc $f[1];
+    next if $seen{$c}++;
+    push @calls, $c;
+    $reg_join{$c} = $f[2];
+  }
 }
 
 if (@calls == 0) {
@@ -223,8 +230,69 @@ if (@calls == 0) {
   exit 0;
 }
 
-# Fetch latest activations and merge into ACT cache
 my %callset = map { lc $_ => 1 } @calls;
+
+my @medals = ("\x{1F947}", "\x{1F948}", "\x{1F949}");
+
+# ── Historical year: live API only, no caching ────────────────────────────────
+
+if ($year ne $cur_year) {
+  my %stats;
+  for my $call (@calls) {
+    my $url = "https://api.pota.app/profile/" . uri_escape($call);
+    local $/;
+    open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
+    my $json = <JSON>;
+    close(JSON);
+
+    next unless defined $json and $json ne "";
+    next if $json =~ /not found/i;
+    my $j;
+    eval { $j = decode_json($json); };
+    next if $@;
+    next unless ref $j eq 'HASH';
+
+    my $acts = $j->{recent_activity}{activations};
+    next unless ref $acts eq 'ARRAY';
+
+    for my $a (@{$acts}) {
+      my $date = $a->{date} // "";
+      my ($act_year) = $date =~ /^(\d{4})/;
+      next unless $act_year and $act_year eq $year;
+      $stats{uc $call}{activations}++;
+      $stats{uc $call}{qsos} += $a->{total} // 0;
+    }
+  }
+
+  if (keys %stats == 0) {
+    my $where = defined $channel ? " in $channel" : "";
+    print "no POTA activations found for $year${where} (approx)\n";
+    exit 0;
+  }
+
+  my @sorted = sort {
+    $stats{$b}{activations} <=> $stats{$a}{activations}
+      || $stats{$b}{qsos} <=> $stats{$a}{qsos}
+  } keys %stats;
+
+  print "POTA League $year (approx): ";
+  my $sep = "";
+  my $rank = 1;
+  for my $call (@sorted) {
+    my $medal = $rank <= 3 ? $medals[$rank - 1] : "$rank.";
+    print $sep;
+    print "$medal " . bold($call) . " ("
+        . $stats{$call}{activations} . "A; "
+        . commify($stats{$call}{qsos}) . "Q)";
+    $sep = " \x{B7} ";
+    $rank++;
+  }
+  print "\n";
+  exit 0;
+}
+
+# ── Current year: merge API window into ACT cache ─────────────────────────────
+
 for my $call (@calls) {
   my $url = "https://api.pota.app/profile/" . uri_escape($call);
 
@@ -249,33 +317,23 @@ for my $call (@calls) {
     my $ref  = $a->{reference} // "noref";
     my $tot  = $a->{total} // 0;
     my ($act_year) = $date =~ /^(\d{4})/;
-    next unless $act_year;
-    # Skip past years that already have a collapsed TOTAL -- adding them
-    # again would double-count once flush merges ACT into the existing TOTAL.
-    next if $act_year ne $cur_year and exists $tot->{lc "$call $act_year"};
+    next unless $act_year and $act_year eq $cur_year;
     my $cachekey = lc "$call $act_year $date $ref";
     $act->{$cachekey} //=
       { call => uc $call, year => $act_year, date => $date, ref => $ref, total => $tot };
   }
 }
 
-# Persist: collapses past-year ACT → TOTAL, writes everything
-flush_file($regs, $act, $tot);
+flush_file($regs, $act);
 
-# Compute leaderboard from ACT cache (current year) + TOTAL (historical)
+# ── Build leaderboard from ACT cache ─────────────────────────────────────────
+
 my %stats;
 for my $e (values %{$act}) {
-  next unless $e->{year} eq $year;
+  next unless $e->{year} eq $cur_year;
   next unless $callset{lc $e->{call}};
   $stats{uc $e->{call}}{activations}++;
   $stats{uc $e->{call}}{qsos} += $e->{total};
-}
-for my $t (values %{$tot}) {
-  next unless $t->{year} eq $year;
-  next unless $callset{lc $t->{call}};
-  my $call = uc $t->{call};
-  $stats{$call}{activations} = ($stats{$call}{activations} // 0) + $t->{acts};
-  $stats{$call}{qsos}        = ($stats{$call}{qsos}        // 0) + $t->{qsos};
 }
 
 if (keys %stats == 0) {
@@ -284,22 +342,36 @@ if (keys %stats == 0) {
   exit 0;
 }
 
+# Flag callsigns whose join date falls within the current year -- their cached
+# count is a floor, not a ceiling (earlier activations may not have been seen).
+my %incomplete;
+for my $call (keys %stats) {
+  my $jd = $reg_join{$call};
+  next unless defined $jd;
+  my ($jy) = $jd =~ /^(\d{4})/;
+  $incomplete{$call} = 1 if defined $jy and $jy eq $cur_year;
+}
+
 my @sorted = sort {
   $stats{$b}{activations} <=> $stats{$a}{activations}
     || $stats{$b}{qsos} <=> $stats{$a}{qsos}
 } keys %stats;
 
-my @medals = ("🥇", "🥈", "🥉");
 print "POTA League $year: ";
 my $sep = "";
 my $rank = 1;
+my $any_incomplete = 0;
 for my $call (@sorted) {
   my $medal = $rank <= 3 ? $medals[$rank - 1] : "$rank.";
+  my $flag  = $incomplete{$call} ? "*" : "";
+  $any_incomplete = 1 if $flag;
   print $sep;
-  print "$medal " . bold($call) . " ("
+  print "$medal " . bold($call) . "$flag ("
       . $stats{$call}{activations} . "A; "
       . commify($stats{$call}{qsos}) . "Q)";
   $sep = " \x{B7} ";
   $rank++;
 }
 print "\n";
+print "* data tracked from join date; earlier activations not captured\n"
+  if $any_incomplete;
