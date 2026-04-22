@@ -35,7 +35,16 @@ $exitnonzeroonerror = 0 if $username eq getEggdropUID();
 @ARGV = map { decode "utf-8", $_ } @ARGV;
 @ARGV = split(' ', join(' ', @ARGV));
 
-my $leaguefile = $ENV{'HOME'} . "/.qrmbot/db/potaleague";
+my $dbdir      = $ENV{'HOME'} . "/.qrmbot/db";
+my $leaguefile = "$dbdir/potaleague";
+
+if (not -d $dbdir) {
+  print "making db directory..\n";
+  system("mkdir -p $dbdir");
+  if (not -d $dbdir) {
+    print "unable to make db directory $dbdir\n";
+  }
+}
 
 my $year        = strftime("%Y", gmtime(time()));
 my $channel     = undef;
