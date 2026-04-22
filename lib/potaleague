@@ -5,15 +5,11 @@
 # Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
 # (one entry per line: "<channel> <callsign>").
 # Activation and QSO counts are fetched live from the POTA API.
-# If $HOME/.qrmbot/creds/pota contains POTA_USER and POTA_PASS, the
-# authenticated API is used (full history); otherwise falls back to the
-# public profile API (last 25 activations only).
 #
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
 
-# https://api.pota.app/activations/user/<callsign>  -- full history (auth req'd)
-# https://api.pota.app/profile/<callsign>           -- public, last 25 only
+# https://api.pota.app/profile/<callsign>  -- user profile / recent_activity
 
 use URI::Escape;
 use JSON qw( decode_json );
@@ -39,7 +35,6 @@ $exitnonzeroonerror = 0 if $username eq getEggdropUID();
 
 my $dbdir      = $ENV{'HOME'} . "/.qrmbot/db";
 my $leaguefile = "$dbdir/potaleague";
-my $credsfile  = $ENV{'HOME'} . "/.qrmbot/creds/pota";
 
 if (not -d $dbdir) {
   print "making db directory..\n";
@@ -158,22 +153,6 @@ if ($do_remove) {
   exit 0;
 }
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-# TOKEN in $credsfile is a POTA JWT, obtained from the browser:
-#   document.querySelector('#app').__vue__.$store.state.user.token
-# Paste the result into $HOME/.qrmbot/creds/pota as: TOKEN=eyJ...
-# Refresh it manually when it expires (~30 days).
-
-my $auth_token;
-if (-f $credsfile) {
-  open(my $cfh, '<', $credsfile) or die "cannot open $credsfile: $!";
-  while (<$cfh>) {
-    chomp;
-    if (/^TOKEN\s*=\s*(.+)$/) { $auth_token = $1; last; }
-  }
-  close($cfh);
-}
-
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
 my @entries = read_entries();
@@ -195,47 +174,31 @@ if (@calls == 0) {
 
 my %stats;
 for my $call (@calls) {
-  my $acts_ref;
+  my $url = "https://api.pota.app/profile/" . uri_escape($call);
 
-  if (defined $auth_token) {
-    my $url = "https://api.pota.app/activations/user/" . uri_escape($call);
-    local $/;
-    open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s"
-                   . " -H 'Authorization: $auth_token' '$url'");
-    my $json = <JSON>;
-    close(JSON);
-    if (defined $json and $json ne "") {
-      my $j;
-      eval { $j = decode_json($json); };
-      $acts_ref = $j if !$@ and ref $j eq 'ARRAY';
-    }
-  }
+  local $/;
+  open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
+  my $json = <JSON>;
+  close(JSON);
 
-  unless (defined $acts_ref) {
-    # fallback: public profile API, last 25 activations only
-    my $url = "https://api.pota.app/profile/" . uri_escape($call);
-    local $/;
-    open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
-    my $json = <JSON>;
-    close(JSON);
-    next unless defined $json and $json ne "";
-    next if $json =~ /not found/i;
-    my $j;
-    eval { $j = decode_json($json); };
-    next if $@;
-    next unless ref $j eq 'HASH';
-    $acts_ref = $j->{recent_activity}{activations};
-  }
+  next unless defined $json and $json ne "";
+  next if $json =~ /not found/i;
 
-  next unless ref $acts_ref eq 'ARRAY';
+  my $j;
+  eval { $j = decode_json($json); };
+  next if $@;
+  next unless ref $j eq 'HASH';
+
+  my $acts = $j->{recent_activity}{activations};
+  next unless ref $acts eq 'ARRAY';
 
   my ($act_count, $qso_count) = (0, 0);
-  for my $act (@{$acts_ref}) {
+  for my $act (@{$acts}) {
     my $date     = $act->{date} // "";
     my $act_year = ($date =~ /^(\d{4})/) ? $1 : "";
     next unless $act_year eq $year;
     $act_count++;
-    $qso_count += $act->{totalQSOs} // $act->{total} // 0;
+    $qso_count += $act->{total} // 0;
   }
 
   $stats{$call} = { activations => $act_count, qsos => $qso_count }
