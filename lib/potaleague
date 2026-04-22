@@ -107,10 +107,12 @@ sub parse_file {
 
 sub flush_file {
   my ($regs, $cache) = @_;
+  my $cur_year  = strftime("%Y", gmtime(time()));
+  my $keep_from = $cur_year - 1;
   my @cache_lines = map {
     my $e = $cache->{$_};
     "ACT $e->{call} $e->{year} $e->{date} $e->{ref} $e->{total}"
-  } sort keys %{$cache};
+  } grep { $cache->{$_}{year} >= $keep_from } sort keys %{$cache};
   write_file(@{$regs}, @cache_lines);
 }
 
