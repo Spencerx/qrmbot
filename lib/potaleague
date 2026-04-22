@@ -4,7 +4,12 @@
 #
 # Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
 # (one entry per line: "<channel> <callsign>").
-# Activation and QSO counts are fetched live from the POTA API.
+#
+# Activation data is cached in the same file as ACT lines:
+#   ACT <callsign> <year> <date> <reference> <total>
+# Each !potaleague run merges the latest API results into the cache so
+# that activations are accumulated over time, working around the public
+# API's 25-record limit.
 #
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
@@ -71,19 +76,42 @@ while ($i <= $#ARGV) {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-sub read_entries {
-  my @entries = ();
-  return @entries unless -f $leaguefile;
+sub read_file {
+  return () unless -f $leaguefile;
   open(my $fh, '<', $leaguefile) or die "cannot open $leaguefile: $!";
-  while (<$fh>) { chomp; push @entries, $_ if length $_ > 0; }
+  my @lines = grep { length $_ > 0 } map { chomp; $_ } <$fh>;
   close($fh);
-  return @entries;
+  return @lines;
 }
 
-sub write_entries {
+sub write_file {
   open(my $fh, '>', $leaguefile) or die "cannot write $leaguefile: $!";
   print $fh "$_\n" for @_;
   close($fh);
+}
+
+sub parse_file {
+  my @regs;
+  my %cache;  # lc("CALL YEAR DATE REF") => { call, year, date, ref, total }
+  for my $line (read_file()) {
+    if ($line =~ /^ACT\s+(\S+)\s+(\d{4})\s+(\S+)\s+(\S+)\s+(\d+)$/) {
+      my ($call, $yr, $date, $ref, $tot) = (uc $1, $2, $3, $4, $5+0);
+      $cache{lc "$call $yr $date $ref"} =
+        { call => $call, year => $yr, date => $date, ref => $ref, total => $tot };
+    } else {
+      push @regs, $line;
+    }
+  }
+  return (\@regs, \%cache);
+}
+
+sub flush_file {
+  my ($regs, $cache) = @_;
+  my @cache_lines = map {
+    my $e = $cache->{$_};
+    "ACT $e->{call} $e->{year} $e->{date} $e->{ref} $e->{total}"
+  } sort keys %{$cache};
+  write_file(@{$regs}, @cache_lines);
 }
 
 # ── Registration ─────────────────────────────────────────────────────────────
@@ -106,15 +134,15 @@ if ($do_register) {
     exit $exitnonzeroonerror;
   }
 
-  my @existing = read_entries();
+  my ($regs, $cache) = parse_file();
   my $key = "$channel $callsign";
-  if (grep { lc $_ eq lc $key } @existing) {
+  if (grep { lc $_ eq lc $key } @{$regs}) {
     print bold($callsign) . " is already in the POTA league for $channel\n";
     exit 0;
   }
 
-  push @existing, $key;
-  write_entries(@existing);
+  push @{$regs}, $key;
+  flush_file($regs, $cache);
   print "registered " . bold($callsign) . " for the POTA league in $channel\n";
   exit 0;
 }
@@ -139,31 +167,32 @@ if ($do_remove) {
     exit $exitnonzeroonerror;
   }
 
-  my @existing = read_entries();
+  my ($regs, $cache) = parse_file();
   my $key = "$channel $callsign";
-  my @updated = grep { lc $_ ne lc $key } @existing;
+  my @updated = grep { lc $_ ne lc $key } @{$regs};
 
-  if (@updated == @existing) {
+  if (@updated == @{$regs}) {
     print bold($callsign) . " is not registered in the POTA league for $channel\n";
     exit 0;
   }
 
-  write_entries(@updated);
+  flush_file(\@updated, $cache);
   print "removed " . bold($callsign) . " from the POTA league in $channel\n";
   exit 0;
 }
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
-my @entries = read_entries();
+my ($regs, $cache) = parse_file();
+
 my @calls;
 if (defined $channel) {
   @calls = map  { (split ' ', $_, 2)[1] }
-           grep { lc((split ' ', $_, 2)[0]) eq lc($channel) } @entries;
+           grep { lc((split ' ', $_, 2)[0]) eq lc($channel) } @{$regs};
 } else {
   my %seen;
   @calls = grep { !$seen{$_}++ }
-           map  { (split ' ', $_, 2)[1] } @entries;
+           map  { (split ' ', $_, 2)[1] } @{$regs};
 }
 
 if (@calls == 0) {
@@ -172,7 +201,8 @@ if (@calls == 0) {
   exit 0;
 }
 
-my %stats;
+# Fetch latest activations and merge into cache
+my %callset = map { lc $_ => 1 } @calls;
 for my $call (@calls) {
   my $url = "https://api.pota.app/profile/" . uri_escape($call);
 
@@ -192,17 +222,28 @@ for my $call (@calls) {
   my $acts = $j->{recent_activity}{activations};
   next unless ref $acts eq 'ARRAY';
 
-  my ($act_count, $qso_count) = (0, 0);
   for my $act (@{$acts}) {
-    my $date     = $act->{date} // "";
-    my $act_year = ($date =~ /^(\d{4})/) ? $1 : "";
-    next unless $act_year eq $year;
-    $act_count++;
-    $qso_count += $act->{total} // 0;
+    my $date = $act->{date} // "";
+    my $ref  = $act->{reference} // "noref";
+    my $tot  = $act->{total} // 0;
+    my ($act_year) = $date =~ /^(\d{4})/;
+    next unless $act_year;
+    my $cachekey = lc "$call $act_year $date $ref";
+    $cache->{$cachekey} //=
+      { call => uc $call, year => $act_year, date => $date, ref => $ref, total => $tot };
   }
+}
 
-  $stats{$call} = { activations => $act_count, qsos => $qso_count }
-    if $act_count > 0;
+# Persist updated cache
+flush_file($regs, $cache);
+
+# Compute leaderboard from full cache for the requested year
+my %stats;
+for my $e (values %{$cache}) {
+  next unless $e->{year} eq $year;
+  next unless $callset{lc $e->{call}};
+  $stats{uc $e->{call}}{activations}++;
+  $stats{uc $e->{call}}{qsos} += $e->{total};
 }
 
 if (keys %stats == 0) {
