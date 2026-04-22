@@ -12,7 +12,7 @@
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
 
-# https://api.pota.app/auth/                        -- login, returns JWT
+# https://cognito-idp.us-east-2.amazonaws.com/      -- Cognito auth, returns JWT
 # https://api.pota.app/activations/user/<callsign>  -- full history (auth req'd)
 # https://api.pota.app/profile/<callsign>           -- public, last 25 only
 
@@ -175,15 +175,20 @@ if (-f $credsfile) {
 
 my $auth_token;
 if (defined $pota_user and defined $pota_pass) {
-  my $auth_url  = 'https://api.pota.app/auth/';
-  my $auth_body = encode_json({ userId => $pota_user, password => $pota_pass });
+  my $auth_url  = 'https://cognito-idp.us-east-2.amazonaws.com/';
+  my $auth_body = encode_json({
+    AuthFlow       => 'USER_PASSWORD_AUTH',
+    AuthParameters => { USERNAME => $pota_user, PASSWORD => $pota_pass },
+    ClientId       => '7hluqct0n2nckib7i7sd5753oa',
+  });
   my ($tmp_fh, $tmp_name) = tempfile(UNLINK => 1);
   print $tmp_fh $auth_body;
   close($tmp_fh);
 
   local $/;
   open(my $afh, '-|', "curl -k -L --max-time 15 -s -X POST '$auth_url'"
-                    . " -H 'Content-Type: application/json'"
+                    . " -H 'Content-Type: application/x-amz-json-1.1'"
+                    . " -H 'X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth'"
                     . " --data-binary \@$tmp_name");
   my $auth_json = <$afh>;
   close($afh);
@@ -192,9 +197,7 @@ if (defined $pota_user and defined $pota_pass) {
     my $aj;
     eval { $aj = decode_json($auth_json); };
     unless ($@) {
-      $auth_token = $aj->{AuthenticationResult}{IdToken}
-                 // $aj->{token}
-                 // $aj->{access_token};
+      $auth_token = $aj->{AuthenticationResult}{IdToken};
     }
   }
 }
