@@ -12,12 +12,11 @@
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
 
-# https://cognito-idp.us-east-2.amazonaws.com/      -- Cognito auth, returns JWT
 # https://api.pota.app/activations/user/<callsign>  -- full history (auth req'd)
 # https://api.pota.app/profile/<callsign>           -- public, last 25 only
 
 use URI::Escape;
-use JSON qw( decode_json encode_json );
+use JSON qw( decode_json );
 use strict;
 use utf8;
 use feature 'unicode_strings';
@@ -25,7 +24,6 @@ use Encode qw(decode);
 binmode(STDOUT, ":utf8");
 
 use File::Basename;
-use File::Temp qw(tempfile);
 use Cwd 'realpath';
 use lib dirname(realpath(__FILE__));
 use Colors;
@@ -161,45 +159,19 @@ if ($do_remove) {
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+# TOKEN in $credsfile is a POTA JWT, obtained from the browser:
+#   document.querySelector('#app').__vue__.$store.state.user.token
+# Paste the result into $HOME/.qrmbot/creds/pota as: TOKEN=eyJ...
+# Refresh it manually when it expires (~30 days).
 
-my ($pota_user, $pota_pass);
+my $auth_token;
 if (-f $credsfile) {
   open(my $cfh, '<', $credsfile) or die "cannot open $credsfile: $!";
   while (<$cfh>) {
     chomp;
-    if (/^POTA_USER\s*=\s*(.+)$/) { $pota_user = $1; }
-    if (/^POTA_PASS\s*=\s*(.+)$/) { $pota_pass = $1; }
+    if (/^TOKEN\s*=\s*(.+)$/) { $auth_token = $1; last; }
   }
   close($cfh);
-}
-
-my $auth_token;
-if (defined $pota_user and defined $pota_pass) {
-  my $auth_url  = 'https://cognito-idp.us-east-2.amazonaws.com/';
-  my $auth_body = encode_json({
-    AuthFlow       => 'USER_PASSWORD_AUTH',
-    AuthParameters => { USERNAME => $pota_user, PASSWORD => $pota_pass },
-    ClientId       => '7hluqct0n2nckib7i7sd5753oa',
-  });
-  my ($tmp_fh, $tmp_name) = tempfile(UNLINK => 1);
-  print $tmp_fh $auth_body;
-  close($tmp_fh);
-
-  local $/;
-  open(my $afh, '-|', "curl -k -L --max-time 15 -s -X POST '$auth_url'"
-                    . " -H 'Content-Type: application/x-amz-json-1.1'"
-                    . " -H 'X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth'"
-                    . " --data-binary \@$tmp_name");
-  my $auth_json = <$afh>;
-  close($afh);
-
-  if (defined $auth_json and $auth_json ne "") {
-    my $aj;
-    eval { $aj = decode_json($auth_json); };
-    unless ($@) {
-      $auth_token = $aj->{AuthenticationResult}{IdToken};
-    }
-  }
 }
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
