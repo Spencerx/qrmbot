@@ -4,16 +4,20 @@
 #
 # Per-channel registrations persist in $HOME/.qrmbot/db/potaleague
 # (one entry per line: "<channel> <callsign>").
-# Activation and QSO counts are fetched live from the POTA API, so any
-# calendar year can be queried as long as POTA retains the history.
+# Activation and QSO counts are fetched live from the POTA API.
+# If $HOME/.qrmbot/creds/pota contains POTA_USER and POTA_PASS, the
+# authenticated API is used (full history); otherwise falls back to the
+# public profile API (last 25 activations only).
 #
 # 2-clause BSD license.
 # Copyright (c) 2026 nreed97@github. All rights reserved.
 
-# https://api.pota.app/profile/<callsign>  -- user profile / recent_activity
+# https://api.pota.app/auth/                        -- login, returns JWT
+# https://api.pota.app/activations/user/<callsign>  -- full history (auth req'd)
+# https://api.pota.app/profile/<callsign>           -- public, last 25 only
 
 use URI::Escape;
-use JSON qw( decode_json );
+use JSON qw( decode_json encode_json );
 use strict;
 use utf8;
 use feature 'unicode_strings';
@@ -21,6 +25,7 @@ use Encode qw(decode);
 binmode(STDOUT, ":utf8");
 
 use File::Basename;
+use File::Temp qw(tempfile);
 use Cwd 'realpath';
 use lib dirname(realpath(__FILE__));
 use Colors;
@@ -36,6 +41,7 @@ $exitnonzeroonerror = 0 if $username eq getEggdropUID();
 
 my $dbdir      = $ENV{'HOME'} . "/.qrmbot/db";
 my $leaguefile = "$dbdir/potaleague";
+my $credsfile  = $ENV{'HOME'} . "/.qrmbot/creds/pota";
 
 if (not -d $dbdir) {
   print "making db directory..\n";
@@ -154,6 +160,45 @@ if ($do_remove) {
   exit 0;
 }
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+my ($pota_user, $pota_pass);
+if (-f $credsfile) {
+  open(my $cfh, '<', $credsfile) or die "cannot open $credsfile: $!";
+  while (<$cfh>) {
+    chomp;
+    if (/^POTA_USER\s*=\s*(.+)$/) { $pota_user = $1; }
+    if (/^POTA_PASS\s*=\s*(.+)$/) { $pota_pass = $1; }
+  }
+  close($cfh);
+}
+
+my $auth_token;
+if (defined $pota_user and defined $pota_pass) {
+  my $auth_url  = 'https://api.pota.app/auth/';
+  my $auth_body = encode_json({ userId => $pota_user, password => $pota_pass });
+  my ($tmp_fh, $tmp_name) = tempfile(UNLINK => 1);
+  print $tmp_fh $auth_body;
+  close($tmp_fh);
+
+  local $/;
+  open(my $afh, '-|', "curl -k -L --max-time 15 -s -X POST '$auth_url'"
+                    . " -H 'Content-Type: application/json'"
+                    . " --data-binary \@$tmp_name");
+  my $auth_json = <$afh>;
+  close($afh);
+
+  if (defined $auth_json and $auth_json ne "") {
+    my $aj;
+    eval { $aj = decode_json($auth_json); };
+    unless ($@) {
+      $auth_token = $aj->{AuthenticationResult}{IdToken}
+                 // $aj->{token}
+                 // $aj->{access_token};
+    }
+  }
+}
+
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
 my @entries = read_entries();
@@ -175,31 +220,47 @@ if (@calls == 0) {
 
 my %stats;
 for my $call (@calls) {
-  my $url = "https://api.pota.app/profile/" . uri_escape($call);
+  my $acts_ref;
 
-  local $/;
-  open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
-  my $json = <JSON>;
-  close(JSON);
+  if (defined $auth_token) {
+    my $url = "https://api.pota.app/activations/user/" . uri_escape($call);
+    local $/;
+    open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s"
+                   . " -H 'Authorization: $auth_token' '$url'");
+    my $json = <JSON>;
+    close(JSON);
+    if (defined $json and $json ne "") {
+      my $j;
+      eval { $j = decode_json($json); };
+      $acts_ref = $j if !$@ and ref $j eq 'ARRAY';
+    }
+  }
 
-  next unless defined $json and $json ne "";
-  next if $json =~ /not found/i;
+  unless (defined $acts_ref) {
+    # fallback: public profile API, last 25 activations only
+    my $url = "https://api.pota.app/profile/" . uri_escape($call);
+    local $/;
+    open(JSON, '-|', "curl -k -L --max-time 15 --retry 1 -s '$url'");
+    my $json = <JSON>;
+    close(JSON);
+    next unless defined $json and $json ne "";
+    next if $json =~ /not found/i;
+    my $j;
+    eval { $j = decode_json($json); };
+    next if $@;
+    next unless ref $j eq 'HASH';
+    $acts_ref = $j->{recent_activity}{activations};
+  }
 
-  my $j;
-  eval { $j = decode_json($json); };
-  next if $@;
-  next unless ref $j eq 'HASH';
-
-  my $acts = $j->{recent_activity}->{activations};
-  next unless ref $acts eq 'ARRAY';
+  next unless ref $acts_ref eq 'ARRAY';
 
   my ($act_count, $qso_count) = (0, 0);
-  for my $act (@{$acts}) {
-    my $date = $act->{date} // "";
+  for my $act (@{$acts_ref}) {
+    my $date     = $act->{date} // "";
     my $act_year = ($date =~ /^(\d{4})/) ? $1 : "";
     next unless $act_year eq $year;
     $act_count++;
-    $qso_count += $act->{total} // 0;
+    $qso_count += $act->{totalQSOs} // $act->{total} // 0;
   }
 
   $stats{$call} = { activations => $act_count, qsos => $qso_count }
@@ -217,13 +278,17 @@ my @sorted = sort {
     || $stats{$b}{qsos} <=> $stats{$a}{qsos}
 } keys %stats;
 
+my @medals = ("🥇", "🥈", "🥉");
 print "POTA League $year: ";
 my $sep = "";
+my $rank = 1;
 for my $call (@sorted) {
+  my $medal = $rank <= 3 ? $medals[$rank - 1] : "$rank.";
   print $sep;
-  print bold($call) . " "
-      . $stats{$call}{activations} . "A,"
-      . commify($stats{$call}{qsos}) . "Q";
-  $sep = " - ";
+  print "$medal " . bold($call) . " ("
+      . $stats{$call}{activations} . "A; "
+      . commify($stats{$call}{qsos}) . "Q)";
+  $sep = " \x{B7} ";
+  $rank++;
 }
 print "\n";
