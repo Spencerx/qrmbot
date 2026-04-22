@@ -36,6 +36,9 @@
  * `!league` -- report clublog league standings
  * `!pota` -- search POTA parks and users
  * `!potapark` -- find POTA parks near a given location
+ * `!potaleague` -- POTA yearly activation leaderboard (per channel)
+ * `!potaleagueadd` `!potaleaguereg` -- register a callsign for the POTA league
+ * `!potaleaguedel` `!potaleagueremove` -- remove a callsign from the POTA league
  * `!sota` -- search SOTA summits
  * `!iota` -- search IOTA islands
  * `!1x1` -- search 1x1 special event stations
@@ -831,6 +834,54 @@ Examples:
     <qrm> US-7888: Alcatraz Island National Historic Site -- San Francisco,
         CA, USA -- 5.8 km N
 ```
+
+### `!potaleague` -- POTA yearly activation leaderboard
+
+Usage:
+
+```
+    !potaleague [year]
+```
+
+Shows the POTA activation leaderboard for the current channel for the given
+year (defaults to the current calendar year). Each channel has its own list
+of registered callsigns. Activation and QSO counts are fetched live from the
+POTA API.
+
+Examples:
+
+```
+<molo1134> !potaleague
+<qrm> POTA League 2026: NV3Y 6A,150Q - W0NY 1A,20Q
+
+<molo1134> !potaleague 2025
+<qrm> POTA League 2025: W0NY 12A,500Q - NV3Y 8A,300Q
+```
+
+### `!potaleagueadd` -- register a callsign for the POTA league
+
+Aliases: `!potaleaguereg`
+
+Usage:
+
+```
+    !potaleagueadd <callsign>
+```
+
+Registers a callsign for the POTA league in the current channel.
+Registrations are stored per channel in `$HOME/.qrmbot/db/potaleague`.
+
+### `!potaleaguedel` -- remove a callsign from the POTA league
+
+Aliases: `!potaleagueremove`
+
+Usage:
+
+```
+    !potaleaguedel <callsign>
+```
+
+Removes a callsign from the POTA league in the current channel.
 
 ### `!sota` -- search SOTA summits
 
