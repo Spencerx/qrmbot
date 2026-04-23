@@ -196,8 +196,29 @@ if ($do_register) {
   }
 
   my ($regs, $act) = parse_file();
-  if (grep { my @f = split(' ', $_, 3); lc("$f[0] $f[1]") eq lc("$channel $callsign") } @{$regs}) {
+
+  # Active (non-deleted) duplicate check
+  if (grep { !/^DEL\s/ && do { my @f = split(' ', $_, 3); lc("$f[0] $f[1]") eq lc("$channel $callsign") } } @{$regs}) {
     print bold($callsign) . " is already in the POTA league for $channel\n";
+    exit 0;
+  }
+
+  # Restore a soft-deleted entry, preserving original join date and ACT cache
+  my $restored = 0;
+  for my $r (@{$regs}) {
+    if ($r =~ /^DEL\s/) {
+      my @f = split(' ', $r, 4);  # DEL, channel, callsign, [date]
+      if (lc("$f[1] $f[2]") eq lc("$channel $callsign")) {
+        $r =~ s/^DEL\s+//;
+        $restored = 1;
+        last;
+      }
+    }
+  }
+
+  if ($restored) {
+    flush_file($regs, $act);
+    print "restored " . bold($callsign) . " to the POTA league in $channel (historical data preserved)\n";
     exit 0;
   }
 
@@ -228,17 +249,25 @@ if ($do_remove) {
   }
 
   my ($regs, $act) = parse_file();
-  my @updated = grep {
-    my @f = split(' ', $_, 3);
-    lc("$f[0] $f[1]") ne lc("$channel $callsign")
-  } @{$regs};
 
-  if (@updated == @{$regs}) {
+  # Soft-delete: mark inactive so ACT cache is preserved for restore
+  my $found = 0;
+  for my $r (@{$regs}) {
+    next if $r =~ /^DEL\s/;
+    my @f = split(' ', $r, 3);
+    if (lc("$f[0] $f[1]") eq lc("$channel $callsign")) {
+      $r = "DEL $r";
+      $found = 1;
+      last;
+    }
+  }
+
+  unless ($found) {
     print bold($callsign) . " is not registered in the POTA league for $channel\n";
     exit 0;
   }
 
-  flush_file(\@updated, $act);
+  flush_file($regs, $act);
   print "removed " . bold($callsign) . " from the POTA league in $channel\n";
   exit 0;
 }
@@ -251,7 +280,7 @@ my ($regs, $act) = parse_file();
 my @calls;
 my %reg_join;  # uc(call) => "YYYY-MM-DD" or undef for legacy entries
 if (defined $channel) {
-  for my $line (grep { lc((split(' ', $_, 3))[0]) eq lc($channel) } @{$regs}) {
+  for my $line (grep { !/^DEL\s/ && lc((split(' ', $_, 3))[0]) eq lc($channel) } @{$regs}) {
     my @f = split(' ', $line, 3);
     my $c = uc $f[1];
     push @calls, $c;
@@ -259,7 +288,7 @@ if (defined $channel) {
   }
 } else {
   my %seen;
-  for my $line (@{$regs}) {
+  for my $line (grep { !/^DEL\s/ } @{$regs}) {
     my @f = split(' ', $line, 3);
     my $c = uc $f[1];
     next if $seen{$c}++;
