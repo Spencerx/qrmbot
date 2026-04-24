@@ -310,6 +310,10 @@ my @medals = ("\x{1F947}", "\x{1F948}", "\x{1F949}");
 # ── Historical year: live API only, no caching ────────────────────────────────
 
 if ($year ne $cur_year) {
+  if ($year < 2026) {
+    print "POTA League history is only available from 2026 onward.\n";
+    exit 0;
+  }
   my %stats;
   for my $call (@calls) {
     my $url = "https://api.pota.app/profile/" . uri_escape($call);
