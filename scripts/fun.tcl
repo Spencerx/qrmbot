@@ -1771,9 +1771,6 @@ proc trivia_answer_pub {nick host hand chan text} {
         }
         dict incr trivia_scores($chan) $nick
         lappend trivia_round_correct($chan) $nick
-        putchan $chan "$nick: Correct! \002+1\002"
-    } else {
-        putchan $chan "$nick: Wrong."
     }
 }
 
