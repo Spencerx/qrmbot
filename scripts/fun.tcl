@@ -1591,6 +1591,7 @@ array set trivia_correct       {}
 array set trivia_round_correct {}
 array set trivia_tiebreak      {}
 array set trivia_tienicks      {}
+array set trivia_tb_noanswer   {}
 array set trivia_last_game     {}
 
 proc trivia_is_exempt {nick} {
@@ -1609,7 +1610,7 @@ proc trivia_is_exempt {nick} {
 proc trivia_clear {chan} {
     global trivia_active trivia_starting trivia_questions trivia_qindex
     global trivia_round trivia_scores trivia_answered trivia_correct
-    global trivia_tiebreak trivia_tienicks trivia_round_correct
+    global trivia_tiebreak trivia_tienicks trivia_round_correct trivia_tb_noanswer
     set trivia_active($chan)        0
     set trivia_starting($chan)      0
     set trivia_questions($chan)     {}
@@ -1621,6 +1622,7 @@ proc trivia_clear {chan} {
     set trivia_tiebreak($chan)      0
     set trivia_tienicks($chan)      {}
     set trivia_round_correct($chan) {}
+    set trivia_tb_noanswer($chan)   0
 }
 
 proc trivia_pub {nick host hand chan text} {
@@ -1844,7 +1846,7 @@ proc trivia_end_game {chan} {
 }
 
 proc trivia_tiebreaker_eval {chan} {
-    global trivia_tienicks trivia_round_correct
+    global trivia_tienicks trivia_round_correct trivia_tb_noanswer
 
     set correct_nicks $trivia_round_correct($chan)
 
@@ -1858,14 +1860,24 @@ proc trivia_tiebreaker_eval {chan} {
 
     # If nobody is eliminated (all correct or all wrong), ask another question
     if {[llength $eliminated] == 0 || [llength $eliminated] == [llength $trivia_tienicks($chan)]} {
-        if {[llength $eliminated] == 0} {
-            putchan $chan "Everyone answered correctly — no change! Another tiebreaker..."
+        if {[llength $correct_nicks] == 0} {
+            # Nobody answered at all
+            incr trivia_tb_noanswer($chan)
+            if {$trivia_tb_noanswer($chan) >= 2} {
+                putchan $chan "Nobody answered for 2 rounds. It's a draw between: \002[join $trivia_tienicks($chan) {, }]\002!"
+                trivia_clear $chan
+                return
+            }
+            putchan $chan "Nobody answered — no change! Another tiebreaker..."
         } else {
-            putchan $chan "Nobody answered correctly — no change! Another tiebreaker..."
+            set trivia_tb_noanswer($chan) 0
+            putchan $chan "Everyone answered correctly — no change! Another tiebreaker..."
         }
         utimer 3 [list trivia_ask $chan]
         return
     }
+
+    set trivia_tb_noanswer($chan) 0
 
     # Remove eliminated players from tiebreaker pool
     foreach nick $eliminated {
