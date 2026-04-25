@@ -1,0 +1,204 @@
+#!/usr/bin/perl -w
+#
+# Fetch trivia questions from Open Trivia Database (opentdb.com).
+# Outputs one line per question: correct_idx|question|opt1|opt2[|opt3|opt4]
+#
+# 2-clause BSD license.
+# Copyright (c) 2025 cjh@github. All rights reserved.
+
+use strict;
+use utf8;
+use feature 'unicode_strings';
+binmode(STDOUT, ":utf8");
+
+use JSON::PP qw( decode_json );
+use MIME::Base64 qw( decode_base64 );
+use Encode qw( decode );
+
+use File::Basename;
+use Cwd 'realpath';
+use lib dirname(realpath(__FILE__));
+use Util;
+
+my $username = $ENV{'USER'} || $ENV{'USERNAME'} || getpwuid($<);
+our $exitnonzeroonerror = 1;
+$exitnonzeroonerror = 0 if $username eq getEggdropUID();
+
+# eggdrop passes all args as one string
+@ARGV = split(' ', join(' ', @ARGV));
+
+my $useragent = "qrmbot trivia/1.0";
+my $api_base  = "https://opentdb.com";
+my $token_file = "$ENV{HOME}/.qrmbot/trivia_token.txt";
+my $token_max_age = 6 * 3600;  # 6 hours in seconds
+my $default_count = 10;
+
+my $count = $default_count;
+my $do_fetch = 0;
+
+while (@ARGV) {
+    my $arg = shift @ARGV;
+    if ($arg eq "--fetch") {
+        $do_fetch = 1;
+    } elsif ($arg eq "--count") {
+        $count = shift @ARGV;
+    }
+}
+
+unless ($do_fetch) {
+    print STDERR "Usage: trivia --fetch [--count N]\n";
+    exit($exitnonzeroonerror ? 1 : 0);
+}
+
+fetch_questions($count);
+
+# ---- token management ----
+
+sub load_token {
+    return (undef, 0) unless -f $token_file;
+    open(my $fh, '<', $token_file) or return (undef, 0);
+    my $token = <$fh>; chomp $token if defined $token;
+    my $ts    = <$fh>; chomp $ts    if defined $ts;
+    close $fh;
+    return ($token, $ts // 0);
+}
+
+sub save_token {
+    my ($token) = @_;
+    my $dir = "$ENV{HOME}/.qrmbot";
+    mkdir $dir unless -d $dir;
+    open(my $fh, '>', $token_file) or die "Cannot write token file: $!";
+    print $fh "$token\n", time(), "\n";
+    close $fh;
+}
+
+sub request_new_token {
+    my $url  = "$api_base/api_token.php?command=request";
+    my $json = curl_get($url);
+    return undef unless defined $json;
+    my $data = eval { decode_json($json) };
+    return undef if $@ || !defined $data->{token};
+    save_token($data->{token});
+    return $data->{token};
+}
+
+sub reset_token {
+    my ($token) = @_;
+    my $url  = "$api_base/api_token.php?command=reset&token=$token";
+    my $json = curl_get($url);
+    return undef unless defined $json;
+    my $data = eval { decode_json($json) };
+    return undef if $@ || !defined $data->{token};
+    save_token($data->{token});
+    return $data->{token};
+}
+
+sub get_token {
+    my ($token, $ts) = load_token();
+    if (defined $token && (time() - $ts) < $token_max_age) {
+        return $token;
+    }
+    return request_new_token();
+}
+
+# ---- question fetch ----
+
+sub fetch_questions {
+    my ($n) = @_;
+
+    my $token = get_token();
+    unless (defined $token) {
+        print STDERR "trivia: could not get session token\n";
+        exit($exitnonzeroonerror ? 1 : 0);
+    }
+
+    my $url  = "$api_base/api.php?amount=${n}&encode=base64&token=${token}";
+    my $json = curl_get($url);
+    unless (defined $json) {
+        print STDERR "trivia: API request failed\n";
+        exit($exitnonzeroonerror ? 1 : 0);
+    }
+
+    my $data = eval { decode_json($json) };
+    if ($@) {
+        print STDERR "trivia: JSON parse error: $@\n";
+        exit($exitnonzeroonerror ? 1 : 0);
+    }
+
+    my $rc = $data->{response_code} // -1;
+
+    if ($rc == 3) {
+        # token not found — get a new one and retry once
+        $token = request_new_token();
+        unless (defined $token) {
+            print STDERR "trivia: could not get new session token\n";
+            exit($exitnonzeroonerror ? 1 : 0);
+        }
+        $url  = "$api_base/api.php?amount=${n}&encode=base64&token=${token}";
+        $json = curl_get($url);
+        $data = eval { decode_json($json) } if defined $json;
+        $rc   = defined $data ? ($data->{response_code} // -1) : -1;
+    }
+
+    if ($rc == 4) {
+        # token exhausted — reset and retry once
+        $token = reset_token($token);
+        unless (defined $token) {
+            print STDERR "trivia: could not reset session token\n";
+            exit($exitnonzeroonerror ? 1 : 0);
+        }
+        $url  = "$api_base/api.php?amount=${n}&encode=base64&token=${token}";
+        $json = curl_get($url);
+        $data = eval { decode_json($json) } if defined $json;
+        $rc   = defined $data ? ($data->{response_code} // -1) : -1;
+    }
+
+    if ($rc != 0) {
+        print STDERR "trivia: API response code $rc\n";
+        exit($exitnonzeroonerror ? 1 : 0);
+    }
+
+    my @results = @{ $data->{results} // [] };
+    unless (@results) {
+        print STDERR "trivia: no questions returned\n";
+        exit($exitnonzeroonerror ? 1 : 0);
+    }
+
+    for my $q (@results) {
+        my $question = decode('UTF-8', decode_base64($q->{question}));
+        my $correct  = decode('UTF-8', decode_base64($q->{correct_answer}));
+        my @wrong    = map { decode('UTF-8', decode_base64($_)) } @{ $q->{incorrect_answers} };
+
+        # Shuffle correct answer into random position
+        my @options = (@wrong, $correct);
+        fisher_yates_shuffle(\@options);
+        my $correct_idx = 1;
+        for my $i (0 .. $#options) {
+            if ($options[$i] eq $correct) {
+                $correct_idx = $i + 1;
+                last;
+            }
+        }
+
+        # Sanitize pipe characters (shouldn't appear in trivia text, but just in case)
+        $question =~ s/\|/\//g;
+        @options  = map { s/\|/\//gr } @options;
+
+        print join("|", $correct_idx, $question, @options), "\n";
+    }
+}
+
+sub fisher_yates_shuffle {
+    my $arr = shift;
+    for my $i (reverse 1 .. $#$arr) {
+        my $j = int(rand($i + 1));
+        @{$arr}[$i, $j] = @{$arr}[$j, $i];
+    }
+}
+
+sub curl_get {
+    my ($url) = @_;
+    my $out = `curl --max-time 10 -s -k -L -A "$useragent" '$url'`;
+    return undef if $? != 0 || !defined $out || $out eq '';
+    return $out;
+}

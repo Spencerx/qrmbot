@@ -1561,6 +1561,354 @@ proc shame {nick uhost hand chan text} {
 bind pub - !shame shame
 
 
+# ============================================================================
+# !trivia — Multi-round IRC trivia game using Open Trivia Database
+#
+# Commands:
+#   !trivia      — start a game (30-second countdown, then 3 rounds of 10s)
+#   !answer <n>  — submit answer during a round
+#   !triviastop  — abort a game (molo/Crossbar only)
+#
+# Cooldown: 30 minutes per channel. molo and Crossbar are exempt.
+# Tie-break: keep asking questions; players who answer wrong are eliminated
+#            until one player remains.
+# ============================================================================
+
+set triviabin          "/home/eggdrop/bin/trivia"
+set trivia_rounds      3
+set trivia_round_secs  10
+set trivia_start_delay 30
+set trivia_cooldown_secs 1800
+
+array set trivia_active        {}
+array set trivia_starting      {}
+array set trivia_questions     {}
+array set trivia_qindex        {}
+array set trivia_round         {}
+array set trivia_scores        {}
+array set trivia_answered      {}
+array set trivia_correct       {}
+array set trivia_round_correct {}
+array set trivia_tiebreak      {}
+array set trivia_tienicks      {}
+array set trivia_last_game     {}
+
+proc trivia_is_exempt {nick} {
+    set exempt {molo Crossbar}
+    foreach e $exempt {
+        if {[string equal -nocase $nick $e]} {
+            if {[llength [info procs isRegistered]] > 0} {
+                return [isRegistered $nick]
+            }
+            return 1
+        }
+    }
+    return 0
+}
+
+proc trivia_clear {chan} {
+    global trivia_active trivia_starting trivia_questions trivia_qindex
+    global trivia_round trivia_scores trivia_answered trivia_correct
+    global trivia_tiebreak trivia_tienicks trivia_round_correct
+    set trivia_active($chan)        0
+    set trivia_starting($chan)      0
+    set trivia_questions($chan)     {}
+    set trivia_qindex($chan)        0
+    set trivia_round($chan)         0
+    set trivia_scores($chan)        {}
+    set trivia_answered($chan)      {}
+    set trivia_correct($chan)       0
+    set trivia_tiebreak($chan)      0
+    set trivia_tienicks($chan)      {}
+    set trivia_round_correct($chan) {}
+}
+
+proc trivia_pub {nick host hand chan text} {
+    global trivia_active trivia_starting trivia_last_game
+    global trivia_cooldown_secs trivia_rounds trivia_round_secs trivia_start_delay
+
+    if {[info exists trivia_active($chan)] && $trivia_active($chan)} {
+        putchan $chan "A trivia game is already in progress. Use !answer <number> to play!"
+        return
+    }
+    if {[info exists trivia_starting($chan)] && $trivia_starting($chan)} {
+        putchan $chan "A trivia game is starting soon. Get ready!"
+        return
+    }
+
+    if {![trivia_is_exempt $nick]} {
+        if {[info exists trivia_last_game($chan)]} {
+            set elapsed [expr {[clock seconds] - $trivia_last_game($chan)}]
+            if {$elapsed < $trivia_cooldown_secs} {
+                set remaining [expr {$trivia_cooldown_secs - $elapsed}]
+                set nexttime [clock format [expr {[clock seconds] + $remaining}] -format "%H:%M UTC" -gmt 1]
+                putchan $chan "$nick: Trivia is on cooldown. Next game allowed at $nexttime."
+                return
+            }
+        }
+    }
+
+    trivia_clear $chan
+    set trivia_starting($chan) 1
+    putchan $chan "Trivia starting in ${trivia_start_delay}s! $trivia_rounds rounds, ${trivia_round_secs}s each. Type !answer <number> to play."
+    utimer $trivia_start_delay [list trivia_start $chan]
+}
+
+proc trivia_start {chan} {
+    global triviabin trivia_starting trivia_active trivia_questions
+    global trivia_qindex trivia_round trivia_last_game
+
+    # Bail if game was cancelled during countdown
+    if {![info exists trivia_starting($chan)] || !$trivia_starting($chan)} { return }
+    set trivia_starting($chan) 0
+
+    set lines {}
+    if {[catch {
+        set fd [open "|${triviabin} --fetch --count 10" r]
+        fconfigure $fd -encoding utf-8
+        while {[gets $fd line] >= 0} {
+            if {$line ne ""} { lappend lines $line }
+        }
+        close $fd
+    } err]} {
+        putchan $chan "Trivia error: could not fetch questions. Try again later."
+        putlog "trivia_start error: $err"
+        return
+    }
+
+    if {[llength $lines] == 0} {
+        putchan $chan "Trivia error: no questions returned. Try again later."
+        return
+    }
+
+    set trivia_active($chan)    1
+    set trivia_questions($chan) $lines
+    set trivia_qindex($chan)    0
+    set trivia_round($chan)     1
+    set trivia_last_game($chan) [clock seconds]
+
+    trivia_ask $chan
+}
+
+proc trivia_ask {chan} {
+    global trivia_questions trivia_qindex trivia_correct trivia_answered trivia_round_correct
+    global trivia_round trivia_rounds trivia_round_secs trivia_tiebreak trivia_tienicks
+
+    set qlist $trivia_questions($chan)
+    set idx   $trivia_qindex($chan)
+
+    if {$idx >= [llength $qlist]} {
+        # Ran out of questions (shouldn't happen with 10 fetched)
+        putchan $chan "Trivia: ran out of questions. Game over!"
+        trivia_end_game $chan
+        return
+    }
+
+    set line [lindex $qlist $idx]
+    incr trivia_qindex($chan)
+
+    set parts   [split $line "|"]
+    set correct [lindex $parts 0]
+    set question [lindex $parts 1]
+    set options  [lrange $parts 2 end]
+
+    set trivia_correct($chan)       $correct
+    set trivia_answered($chan)     {}
+    set trivia_round_correct($chan) {}
+
+    if {$trivia_tiebreak($chan)} {
+        set label "Tiebreaker (still in: [join $trivia_tienicks($chan) {, }])"
+    } else {
+        set label "Round $trivia_round($chan)/$trivia_rounds"
+    }
+
+    putchan $chan "\002$label\002 — $question"
+
+    set i 1
+    set optline ""
+    foreach opt $options {
+        append optline "  \002${i})\002 $opt"
+        incr i
+    }
+    putchan $chan $optline
+
+    utimer $trivia_round_secs [list trivia_round_end $chan]
+}
+
+proc trivia_answer_pub {nick host hand chan text} {
+    global trivia_active trivia_tiebreak trivia_tienicks
+    global trivia_answered trivia_correct trivia_scores trivia_questions trivia_round_correct trivia_qindex
+
+    if {![info exists trivia_active($chan)] || !$trivia_active($chan)} { return }
+
+    if {$trivia_tiebreak($chan)} {
+        if {[lsearch -exact $trivia_tienicks($chan) $nick] == -1} { return }
+    }
+
+    if {[lsearch -exact $trivia_answered($chan) $nick] != -1} {
+        putchan $chan "$nick: you already answered this round!"
+        return
+    }
+
+    set ans [string trim $text]
+    if {![string is integer -strict $ans] || $ans < 1} {
+        putchan $chan "$nick: please answer with a number (e.g. !answer 2)"
+        return
+    }
+
+    set parts   [split [lindex $trivia_questions($chan) [expr {$trivia_qindex($chan) - 1}]] "|"]
+    set nopts   [expr {[llength $parts] - 2}]
+    if {$ans > $nopts} {
+        putchan $chan "$nick: answer must be between 1 and $nopts"
+        return
+    }
+
+    lappend trivia_answered($chan) $nick
+
+    if {$ans == $trivia_correct($chan)} {
+        if {![dict exists $trivia_scores($chan) $nick]} {
+            set trivia_scores($chan) [dict set trivia_scores($chan) $nick 0]
+        }
+        dict incr trivia_scores($chan) $nick
+        lappend trivia_round_correct($chan) $nick
+        putchan $chan "$nick: Correct! \002+1\002"
+    } else {
+        putchan $chan "$nick: Wrong."
+    }
+}
+
+proc trivia_round_end {chan} {
+    global trivia_correct trivia_questions trivia_qindex trivia_round trivia_rounds
+    global trivia_tiebreak trivia_answered trivia_scores trivia_active
+
+    # Bail if game was stopped while this timer was pending
+    if {![info exists trivia_active($chan)] || !$trivia_active($chan)} { return }
+
+    set parts   [split [lindex $trivia_questions($chan) [expr {$trivia_qindex($chan) - 1}]] "|"]
+    set correct $trivia_correct($chan)
+    set answer  [lindex $parts [expr {$correct + 1}]]
+
+    putchan $chan "Time! The correct answer was \002${correct}) ${answer}\002."
+
+    if {$trivia_tiebreak($chan)} {
+        trivia_tiebreaker_eval $chan
+        return
+    }
+
+    incr trivia_round($chan)
+    if {$trivia_round($chan) <= $trivia_rounds} {
+        utimer 3 [list trivia_ask $chan]
+    } else {
+        trivia_end_game $chan
+    }
+}
+
+proc trivia_end_game {chan} {
+    global trivia_scores
+
+    set scores $trivia_scores($chan)
+
+    if {[dict size $scores] == 0} {
+        putchan $chan "Game over! No one scored any points. Better luck next time."
+        trivia_clear $chan
+        return
+    }
+
+    set pairs {}
+    dict for {nick score} $scores { lappend pairs [list $nick $score] }
+    set pairs [lsort -integer -decreasing -index 1 $pairs]
+
+    set board ""
+    set place 1
+    foreach p $pairs {
+        set n [lindex $p 0]
+        set s [lindex $p 1]
+        append board " | ${place}. $n: $s"
+        incr place
+    }
+    putchan $chan "Final scores: [string range $board 3 end]"
+
+    set maxscore [lindex [lindex $pairs 0] 1]
+    set winners {}
+    foreach p $pairs {
+        if {[lindex $p 1] == $maxscore} { lappend winners [lindex $p 0] }
+    }
+
+    if {[llength $winners] == 1} {
+        putchan $chan "Winner: \002[lindex $winners 0]\002! Congratulations!"
+        trivia_clear $chan
+    } else {
+        putchan $chan "It's a tie between: \002[join $winners {, }]\002! Starting tiebreaker..."
+        global trivia_tiebreak trivia_tienicks
+        set trivia_tiebreak($chan)  1
+        set trivia_tienicks($chan)  $winners
+        utimer 3 [list trivia_ask $chan]
+    }
+}
+
+proc trivia_tiebreaker_eval {chan} {
+    global trivia_tienicks trivia_round_correct
+
+    set correct_nicks $trivia_round_correct($chan)
+
+    # Determine who is eliminated (in tiebreaker pool but did not answer correctly)
+    set eliminated {}
+    foreach nick $trivia_tienicks($chan) {
+        if {[lsearch -exact $correct_nicks $nick] == -1} {
+            lappend eliminated $nick
+        }
+    }
+
+    # If nobody is eliminated (all correct or all wrong), ask another question
+    if {[llength $eliminated] == 0 || [llength $eliminated] == [llength $trivia_tienicks($chan)]} {
+        if {[llength $eliminated] == 0} {
+            putchan $chan "Everyone answered correctly — no change! Another tiebreaker..."
+        } else {
+            putchan $chan "Nobody answered correctly — no change! Another tiebreaker..."
+        }
+        utimer 3 [list trivia_ask $chan]
+        return
+    }
+
+    # Remove eliminated players from tiebreaker pool
+    foreach nick $eliminated {
+        set idx [lsearch -exact $trivia_tienicks($chan) $nick]
+        if {$idx != -1} {
+            set trivia_tienicks($chan) [lreplace $trivia_tienicks($chan) $idx $idx]
+        }
+    }
+
+    putchan $chan "Eliminated: [join $eliminated {, }]."
+
+    if {[llength $trivia_tienicks($chan)] == 1} {
+        putchan $chan "Winner: \002[lindex $trivia_tienicks($chan) 0]\002! Congratulations!"
+        trivia_clear $chan
+    } else {
+        putchan $chan "Still tied: \002[join $trivia_tienicks($chan) {, }]\002. Another tiebreaker..."
+        utimer 3 [list trivia_ask $chan]
+    }
+}
+
+proc trivia_stop_pub {nick host hand chan text} {
+    global trivia_active trivia_starting
+    if {![trivia_is_exempt $nick]} {
+        putchan $chan "$nick: only molo or Crossbar can stop a trivia game."
+        return
+    }
+    if {([info exists trivia_active($chan)] && $trivia_active($chan)) ||
+        ([info exists trivia_starting($chan)] && $trivia_starting($chan))} {
+        trivia_clear $chan
+        putchan $chan "Trivia stopped by $nick."
+    } else {
+        putchan $chan "No trivia game is running."
+    }
+}
+
+bind pub - !trivia     trivia_pub
+bind pub - !answer     trivia_answer_pub
+bind pub - !triviastop trivia_stop_pub
+
+
 # NHL scores: !nhl <team> plus common aliases
 set nhlbin "/home/eggdrop/bin/nhl"
 bind pub - !nhl nhl_pub
