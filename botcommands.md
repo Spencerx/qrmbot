@@ -90,6 +90,7 @@
  * `!spacex` -- next spacex launch
  * `!translate` -- translate text
  * `!rand` `!dice` `!flip` `!8ball` `!orb` -- random
+ * `!trivia` `!answer` -- IRC trivia game (Open Trivia Database, 3 rounds, 30 min cooldown)
 
 ## Radio-related commands:
 
@@ -1088,6 +1089,41 @@ Example:
 ### `!spacex` -- next spacex launch
 ### `!translate` -- translate text
 ### `!rand` `!dice` `!flip` `!8ball` `!orb` -- random
+
+### `!trivia` `!answer` -- IRC trivia game
+
+Usage:
+```
+    !trivia               start a trivia game in the channel
+    !answer <number>      submit your answer during a round
+    !triviastop           abort the current game (molo/Crossbar only)
+```
+
+Starts a 3-round multiple-choice trivia game using the Open Trivia Database.
+After `!trivia`, there is a 30-second countdown before the first question.
+Each round shows a question with numbered options; players type `!answer <n>`
+to submit. The round ends after 10 seconds. At the end of 3 rounds, the player
+with the most correct answers wins. In case of a tie, additional tiebreaker
+questions are asked and players who answer incorrectly are eliminated until one
+player remains.
+
+Cooldown: 30 minutes per channel between games. molo and Crossbar are exempt.
+Questions are sourced from [Open Trivia Database](https://opentdb.com/) using a
+session token to avoid repeats (token expires after 6 hours of inactivity).
+
+Example:
+```
+    < Crossbar> !trivia
+    < qrm> Trivia starting in 30s! 3 rounds, 10s each. Type !answer <number> to play.
+    < qrm> Round 1/3 — What is the capital of France?
+    < qrm>   1) Berlin  2) Madrid  3) Paris  4) Rome
+    < Crossbar> !answer 3
+    < qrm> Crossbar: Correct! +1
+    < qrm> Time! The correct answer was 3) Paris.
+    ...
+    < qrm> Final scores: 1. Crossbar: 2 | 2. molo: 1
+    < qrm> Winner: Crossbar! Congratulations!
+```
 
 <!-- !amcon - - some dumb prepper shit -->
 
