@@ -29,7 +29,7 @@ $exitnonzeroonerror = 0 if $username eq getEggdropUID();
 
 my $useragent = "qrmbot trivia/1.0";
 my $api_base  = "https://opentdb.com";
-my $token_file = "$ENV{HOME}/.qrmbot/trivia_token.txt";
+my $token_file = "$ENV{HOME}/.qrmbot/cache/trivia_token.txt";
 my $token_max_age = 6 * 3600;  # 6 hours in seconds
 my $default_count = 10;
 
