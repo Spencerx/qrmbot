@@ -1566,7 +1566,7 @@ bind pub - !shame shame
 #
 # Commands:
 #   !trivia      — start a game (30-second countdown, then 3 rounds of 10s)
-#   !answer <n>  — submit answer during a round
+#   !answer <n>, !a <n> — submit answer during a round
 #   !triviastop  — abort a game (molo/Crossbar only)
 #
 # Cooldown: 30 minutes per channel. molo and Crossbar are exempt.
@@ -1576,7 +1576,7 @@ bind pub - !shame shame
 
 set triviabin          "/home/eggdrop/bin/trivia"
 set trivia_rounds      3
-set trivia_round_secs  10
+set trivia_round_secs  20
 set trivia_start_delay 30
 set trivia_cooldown_secs 1800
 
@@ -1630,7 +1630,7 @@ proc trivia_pub {nick host hand chan text} {
     global trivia_cooldown_secs trivia_rounds trivia_round_secs trivia_start_delay
 
     if {[info exists trivia_active($chan)] && $trivia_active($chan)} {
-        putchan $chan "A trivia game is already in progress. Use !answer <number> to play!"
+        putchan $chan "A trivia game is already in progress. Use !a <number> to play!"
         return
     }
     if {[info exists trivia_starting($chan)] && $trivia_starting($chan)} {
@@ -1652,7 +1652,7 @@ proc trivia_pub {nick host hand chan text} {
 
     trivia_clear $chan
     set trivia_starting($chan) 1
-    putchan $chan "Trivia starting in ${trivia_start_delay}s! $trivia_rounds rounds, ${trivia_round_secs}s each. Type !answer <number> to play."
+    putchan $chan "Trivia starting in ${trivia_start_delay}s! $trivia_rounds rounds, ${trivia_round_secs}s each. Type !a <number> to play."
     utimer $trivia_start_delay [list trivia_start $chan]
 }
 
@@ -1754,7 +1754,7 @@ proc trivia_answer_pub {nick host hand chan text} {
 
     set ans [string trim $text]
     if {![string is integer -strict $ans] || $ans < 1} {
-        putchan $chan "$nick: please answer with a number (e.g. !answer 2)"
+        putchan $chan "$nick: please answer with a number (e.g. !a 2)"
         return
     }
 
@@ -1846,7 +1846,7 @@ proc trivia_end_game {chan} {
 }
 
 proc trivia_tiebreaker_eval {chan} {
-    global trivia_tienicks trivia_round_correct trivia_tb_noanswer
+    global trivia_tienicks trivia_round_correct trivia_tb_noanswer trivia_answered
 
     set correct_nicks $trivia_round_correct($chan)
 
@@ -1861,14 +1861,21 @@ proc trivia_tiebreaker_eval {chan} {
     # If nobody is eliminated (all correct or all wrong), ask another question
     if {[llength $eliminated] == 0 || [llength $eliminated] == [llength $trivia_tienicks($chan)]} {
         if {[llength $correct_nicks] == 0} {
-            # Nobody answered at all
-            incr trivia_tb_noanswer($chan)
-            if {$trivia_tb_noanswer($chan) >= 2} {
-                putchan $chan "Nobody answered for 2 rounds. It's a draw between: \002[join $trivia_tienicks($chan) {, }]\002!"
+            if {[llength $trivia_answered($chan)] == 0} {
+                # Nobody answered at all
+                incr trivia_tb_noanswer($chan)
+                if {$trivia_tb_noanswer($chan) >= 2} {
+                    putchan $chan "Nobody answered for 2 rounds. It's a draw between: \002[join $trivia_tienicks($chan) {, }]\002!"
+                    trivia_clear $chan
+                    return
+                }
+                putchan $chan "Nobody answered — no change! Another tiebreaker..."
+            } else {
+                # Everyone answered wrong — all eliminated, draw
+                putchan $chan "Nobody answered correctly! It's a draw between: \002[join $trivia_tienicks($chan) {, }]\002!"
                 trivia_clear $chan
                 return
             }
-            putchan $chan "Nobody answered — no change! Another tiebreaker..."
         } else {
             set trivia_tb_noanswer($chan) 0
             putchan $chan "Everyone answered correctly — no change! Another tiebreaker..."
@@ -1915,6 +1922,7 @@ proc trivia_stop_pub {nick host hand chan text} {
 
 bind pub - !trivia     trivia_pub
 bind pub - !answer     trivia_answer_pub
+bind pub - !a          trivia_answer_pub
 bind pub - !triviastop trivia_stop_pub
 
 
