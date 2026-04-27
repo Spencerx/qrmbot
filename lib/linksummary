@@ -393,7 +393,7 @@ sub doTwitter {
   }
 
   while ($text =~ m|<a[^>]*href=["']([^"']*?)["']\s*.*?>|i) {
-    push @links, $1;
+    push @links, $1 unless $1 =~ m|^/search|;
     $text =~ s|<a[^>]*href=.*?>(.*?)<\s*/a\s*>|$1|i;
   }
 
